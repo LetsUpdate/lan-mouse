@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::ptr;
 use x11::{
-    xlib::{self, XCloseDisplay},
+    xlib::{self, XCloseDisplay, XSync, CurrentTime},
     xtest,
 };
 
@@ -12,6 +12,9 @@ use input_event::{
 use crate::error::EmulationError;
 
 use super::{Emulation, EmulationHandle, error::X11EmulationCreationError};
+
+/// Screen number -1 means use the current screen
+const CURRENT_SCREEN: i32 = -1;
 
 pub(crate) struct X11Emulation {
     display: *mut xlib::Display,
@@ -29,12 +32,47 @@ impl X11Emulation {
                 display => Ok(display),
             }
         }?;
+
+        // Verify XTest extension is available
+        unsafe {
+            let mut event_base: i32 = 0;
+            let mut error_base: i32 = 0;
+            let mut major_version: i32 = 0;
+            let mut minor_version: i32 = 0;
+            
+            let has_xtest = xtest::XTestQueryExtension(
+                display,
+                &mut event_base,
+                &mut error_base,
+                &mut major_version,
+                &mut minor_version,
+            );
+            
+            if has_xtest == 0 {
+                log::error!("XTest extension not available");
+                XCloseDisplay(display);
+                return Err(X11EmulationCreationError::XTestNotAvailable);
+            }
+            
+            log::info!(
+                "XTest extension version {}.{} available",
+                major_version,
+                minor_version
+            );
+
+            // Enable XTest to work even when input is grabbed by another client
+            // This is important for XFCE4 and other desktop environments that may
+            // have global keyboard grabs for shortcuts
+            xtest::XTestGrabControl(display, 1);
+            xlib::XFlush(display);
+        }
+
         Ok(Self { display })
     }
 
     fn relative_motion(&self, dx: i32, dy: i32) {
         unsafe {
-            xtest::XTestFakeRelativeMotionEvent(self.display, dx, dy, 0, 0);
+            xtest::XTestFakeRelativeMotionEvent(self.display, dx, dy, CURRENT_SCREEN, CurrentTime);
         }
     }
 
@@ -48,7 +86,7 @@ impl X11Emulation {
                 BTN_LEFT => 1,
                 _ => 1,
             };
-            xtest::XTestFakeButtonEvent(self.display, x11_button, state as i32, 0);
+            xtest::XTestFakeButtonEvent(self.display, x11_button, state as i32, CurrentTime);
         };
     }
 
@@ -76,16 +114,23 @@ impl X11Emulation {
         };
 
         unsafe {
-            xtest::XTestFakeButtonEvent(self.display, direction, 1, 0);
-            xtest::XTestFakeButtonEvent(self.display, direction, 0, 0);
+            xtest::XTestFakeButtonEvent(self.display, direction, 1, CurrentTime);
+            xtest::XTestFakeButtonEvent(self.display, direction, 0, CurrentTime);
         }
     }
 
-    #[allow(dead_code)]
     fn emulate_key(&self, key: u32, state: u8) {
-        let key = key + 8; // xorg keycodes are shifted by 8
+        let x11_key = key + 8; // xorg keycodes are shifted by 8
+        let state_str = if state == 0 { "released" } else { "pressed" };
+        log::debug!(
+            "X11 key {}: evdev keycode {} -> X11 keycode {}",
+            state_str, key, x11_key
+        );
         unsafe {
-            xtest::XTestFakeKeyEvent(self.display, key, state as i32, 0);
+            let result = xtest::XTestFakeKeyEvent(self.display, x11_key, state as i32, CurrentTime);
+            if result == 0 {
+                log::warn!("XTestFakeKeyEvent failed for keycode {}", x11_key);
+            }
         }
     }
 }
@@ -93,6 +138,8 @@ impl X11Emulation {
 impl Drop for X11Emulation {
     fn drop(&mut self) {
         unsafe {
+            // Disable XTest grab control before closing
+            xtest::XTestGrabControl(self.display, 0);
             XCloseDisplay(self.display);
         }
     }
@@ -131,10 +178,15 @@ impl Emulation for X11Emulation {
             }) => {
                 self.emulate_key(key, state);
             }
-            _ => {}
+            Event::Keyboard(KeyboardEvent::Modifiers { .. }) => {
+                // X11 doesn't need separate modifier handling as XTest handles this
+                // through the key events themselves
+            }
         }
         unsafe {
             xlib::XFlush(self.display);
+            // Sync to ensure events are processed by the X server
+            XSync(self.display, 0);
         }
         // FIXME
         Ok(())
