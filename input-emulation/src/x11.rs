@@ -13,6 +13,9 @@ use crate::error::EmulationError;
 
 use super::{Emulation, EmulationHandle, error::X11EmulationCreationError};
 
+/// Screen number -1 means use the current screen
+const CURRENT_SCREEN: i32 = -1;
+
 pub(crate) struct X11Emulation {
     display: *mut xlib::Display,
 }
@@ -48,7 +51,7 @@ impl X11Emulation {
             if has_xtest == 0 {
                 log::error!("XTest extension not available");
                 XCloseDisplay(display);
-                return Err(X11EmulationCreationError::OpenDisplay);
+                return Err(X11EmulationCreationError::XTestNotAvailable);
             }
             
             log::info!(
@@ -69,8 +72,7 @@ impl X11Emulation {
 
     fn relative_motion(&self, dx: i32, dy: i32) {
         unsafe {
-            // -1 for screen_number means current screen
-            xtest::XTestFakeRelativeMotionEvent(self.display, dx, dy, -1, CurrentTime);
+            xtest::XTestFakeRelativeMotionEvent(self.display, dx, dy, CURRENT_SCREEN, CurrentTime);
         }
     }
 
@@ -119,9 +121,16 @@ impl X11Emulation {
 
     fn emulate_key(&self, key: u32, state: u8) {
         let x11_key = key + 8; // xorg keycodes are shifted by 8
-        log::trace!("X11 emulate_key: evdev={}, x11={}, state={}", key, x11_key, state);
+        let state_str = if state == 0 { "released" } else { "pressed" };
+        log::debug!(
+            "X11 key {}: evdev keycode {} -> X11 keycode {}",
+            state_str, key, x11_key
+        );
         unsafe {
-            xtest::XTestFakeKeyEvent(self.display, x11_key, state as i32, CurrentTime);
+            let result = xtest::XTestFakeKeyEvent(self.display, x11_key, state as i32, CurrentTime);
+            if result == 0 {
+                log::warn!("XTestFakeKeyEvent failed for keycode {}", x11_key);
+            }
         }
     }
 }
