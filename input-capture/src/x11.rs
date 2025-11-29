@@ -24,6 +24,23 @@ use input_event::{BTN_BACK, BTN_FORWARD, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, Event,
 
 use super::{Capture, CaptureError, CaptureEvent, Position, error::X11InputCaptureCreationError};
 
+/// X11 keycodes are offset by 8 from Linux evdev scancodes.
+/// This is because X11 keycodes reserve values 0-7 for special purposes.
+const X11_KEYCODE_OFFSET: u32 = 8;
+
+/// Discrete scroll value per single scroll tick (matches Windows/Linux conventions)
+const SCROLL_DISCRETE_VALUE: i32 = 120;
+
+/// Scroll wheel X11 button mappings
+const SCROLL_UP_BUTTON: u32 = 4;
+const SCROLL_DOWN_BUTTON: u32 = 5;
+const SCROLL_LEFT_BUTTON: u32 = 6;
+const SCROLL_RIGHT_BUTTON: u32 = 7;
+
+/// Polling interval for cursor position checking in microseconds.
+/// 16ms (~60fps) balances responsiveness with CPU usage.
+const POLL_INTERVAL_US: u64 = 16000;
+
 /// X11 Input Capture backend
 pub struct X11InputCapture {
     event_rx: Receiver<(Position, CaptureEvent)>,
@@ -223,9 +240,6 @@ fn event_thread(
     let mut state = X11State::new(display);
     let _ = ready.send(Ok(()));
 
-    // Poll interval in microseconds
-    const POLL_INTERVAL_US: u64 = 5000; // 5ms
-
     while running.load(Ordering::Relaxed) {
         // Process requests
         while let Ok(request) = request_rx.try_recv() {
@@ -322,21 +336,22 @@ fn process_x11_event(event: &XEvent) -> Option<CaptureEvent> {
                     1 => BTN_LEFT,
                     2 => BTN_MIDDLE,
                     3 => BTN_RIGHT,
-                    4 => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
-                        axis: 0,
-                        value: -120,
+                    // Scroll wheel events - up/down for vertical, left/right for horizontal
+                    SCROLL_UP_BUTTON => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
+                        axis: 0, // Vertical axis
+                        value: -SCROLL_DISCRETE_VALUE,
                     }))),
-                    5 => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
-                        axis: 0,
-                        value: 120,
+                    SCROLL_DOWN_BUTTON => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
+                        axis: 0, // Vertical axis
+                        value: SCROLL_DISCRETE_VALUE,
                     }))),
-                    6 => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
-                        axis: 1,
-                        value: -120,
+                    SCROLL_LEFT_BUTTON => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
+                        axis: 1, // Horizontal axis
+                        value: -SCROLL_DISCRETE_VALUE,
                     }))),
-                    7 => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
-                        axis: 1,
-                        value: 120,
+                    SCROLL_RIGHT_BUTTON => return Some(CaptureEvent::Input(Event::Pointer(PointerEvent::AxisDiscrete120 {
+                        axis: 1, // Horizontal axis
+                        value: SCROLL_DISCRETE_VALUE,
                     }))),
                     8 => BTN_BACK,
                     9 => BTN_FORWARD,
@@ -354,7 +369,8 @@ fn process_x11_event(event: &XEvent) -> Option<CaptureEvent> {
                     1 => BTN_LEFT,
                     2 => BTN_MIDDLE,
                     3 => BTN_RIGHT,
-                    4 | 5 | 6 | 7 => return None, // Scroll events don't have release
+                    // Scroll wheel events don't have release
+                    SCROLL_UP_BUTTON | SCROLL_DOWN_BUTTON | SCROLL_LEFT_BUTTON | SCROLL_RIGHT_BUTTON => return None,
                     8 => BTN_BACK,
                     9 => BTN_FORWARD,
                     _ => return None,
@@ -367,8 +383,7 @@ fn process_x11_event(event: &XEvent) -> Option<CaptureEvent> {
             }
             KeyPress => {
                 let key_event = event.key;
-                // X11 keycodes are offset by 8 from Linux scancodes
-                let key = key_event.keycode.saturating_sub(8);
+                let key = key_event.keycode.saturating_sub(X11_KEYCODE_OFFSET);
                 Some(CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key {
                     time: key_event.time as u32,
                     key,
@@ -377,7 +392,7 @@ fn process_x11_event(event: &XEvent) -> Option<CaptureEvent> {
             }
             KeyRelease => {
                 let key_event = event.key;
-                let key = key_event.keycode.saturating_sub(8);
+                let key = key_event.keycode.saturating_sub(X11_KEYCODE_OFFSET);
                 Some(CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key {
                     time: key_event.time as u32,
                     key,
