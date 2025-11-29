@@ -29,11 +29,18 @@ jobs:
       run: cargo fmt --check
     - name: Clippy
       run: cargo clippy --all-features --all-targets -- --deny warnings
-    - name: Upload build artifact
+    - name: Build Release
+      run: cargo build --release
+    - name: Upload debug build artifact
       uses: actions/upload-artifact@v4
       with:
-        name: lan-mouse
+        name: lan-mouse-debug
         path: target/debug/lan-mouse
+    - name: Upload release build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lan-mouse-linux-release
+        path: target/release/lan-mouse
 
   build-windows:
 
